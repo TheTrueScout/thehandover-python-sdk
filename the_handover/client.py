@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional, Union
 
 import httpx
@@ -19,11 +20,12 @@ from .models import (
     Decision,
     DecisionStatus,
     NumberInputResponse,
+    ScheduleResponse,
     TextInputResponse,
 )
 
 ResponseTypeConfig = Union[
-    ChooseResponse, TextInputResponse, NumberInputResponse, ConfirmResponse
+    ChooseResponse, TextInputResponse, NumberInputResponse, ConfirmResponse, ScheduleResponse
 ]
 
 DEFAULT_BASE_URL = "https://thehandover.xyz"
@@ -260,5 +262,13 @@ class HandoverClient:
             raise DecisionExpired(
                 decision, f"Decision escalated after timeout: {action}"
             )
+
+        if decision.status == DecisionStatus.SCHEDULED and decision.execute_at:
+            execute_time = datetime.fromisoformat(
+                decision.execute_at.replace("Z", "+00:00")
+            )
+            wait_seconds = (execute_time - datetime.now(timezone.utc)).total_seconds()
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
 
         return decision
