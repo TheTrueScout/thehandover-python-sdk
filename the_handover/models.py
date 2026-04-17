@@ -14,6 +14,7 @@ class DecisionStatus(str, Enum):
     MODIFIED = "modified"
     EXPIRED = "expired"
     ESCALATED = "escalated"
+    SCHEDULED = "scheduled"
 
 
 class ResponseType(str, Enum):
@@ -90,6 +91,41 @@ class ConfirmResponse:
 
 
 @dataclass
+class ScheduleResponse:
+    """Let the approver pick *when* the action should run.
+
+    The approver sees a date/time picker alongside the standard Approve/Deny
+    buttons.  When they pick a future time the decision status becomes
+    ``scheduled`` and ``Decision.execute_at`` holds the chosen ISO-8601
+    timestamp.  :meth:`~the_handover.HandoverClient.approve` will sleep until
+    that moment before returning, so the calling agent proceeds at exactly the
+    right time with no extra work.
+
+    Example::
+
+        from the_handover import ScheduleResponse
+
+        decision = client.approve(
+            action="Run nightly database vacuum",
+            approver="ops@company.com",
+            response_type=ScheduleResponse(label="When should the vacuum run?"),
+        )
+        # Execution resumes at the time the approver chose.
+    """
+
+    label: str = "When should this run?"
+    allow_immediate: bool = True
+    """Whether the approver may also click 'Run now' instead of picking a time."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": "schedule",
+            "label": self.label,
+            "allow_immediate": self.allow_immediate,
+        }
+
+
+@dataclass
 class Decision:
     """Represents a resolved or pending decision."""
 
@@ -104,6 +140,9 @@ class Decision:
     resolved_by: Optional[str] = None
     expires_at: Optional[str] = None
     created_at: Optional[str] = None
+    execute_at: Optional[str] = None
+    """ISO-8601 timestamp set when the approver schedules the action for a
+    future time.  Only present when ``status == DecisionStatus.SCHEDULED``."""
 
     @property
     def approved(self) -> bool:
@@ -116,6 +155,10 @@ class Decision:
     @property
     def modified(self) -> bool:
         return self.status == DecisionStatus.MODIFIED
+
+    @property
+    def scheduled(self) -> bool:
+        return self.status == DecisionStatus.SCHEDULED
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Decision:
@@ -131,4 +174,5 @@ class Decision:
             resolved_by=data.get("resolved_by"),
             expires_at=data.get("expires_at"),
             created_at=data.get("created_at"),
+            execute_at=data.get("execute_at"),
         )

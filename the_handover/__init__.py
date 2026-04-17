@@ -9,6 +9,7 @@ from .models import (
     TextInputResponse,
     NumberInputResponse,
     ConfirmResponse,
+    ScheduleResponse,
 )
 from .exceptions import (
     HandoverError,
@@ -28,6 +29,7 @@ __all__ = [
     "TextInputResponse",
     "NumberInputResponse",
     "ConfirmResponse",
+    "ScheduleResponse",
     "HandoverError",
     "DecisionDenied",
     "DecisionExpired",
