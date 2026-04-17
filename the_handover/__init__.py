@@ -5,10 +5,17 @@ from .models import (
     Decision,
     DecisionStatus,
     ResponseType,
+    ApprovalPolicy,
+    AmountRule,
+    DEFAULT_POLICY,
+    DEFAULT_KEYWORDS,
     ChooseResponse,
     TextInputResponse,
     NumberInputResponse,
     ConfirmResponse,
+    ScheduleResponse,
+    FileUploadResponse,
+    Attachment,
 )
 from .exceptions import (
     HandoverError,
@@ -24,10 +31,17 @@ __all__ = [
     "Decision",
     "DecisionStatus",
     "ResponseType",
+    "ApprovalPolicy",
+    "AmountRule",
+    "DEFAULT_POLICY",
+    "DEFAULT_KEYWORDS",
     "ChooseResponse",
     "TextInputResponse",
     "NumberInputResponse",
     "ConfirmResponse",
+    "ScheduleResponse",
+    "FileUploadResponse",
+    "Attachment",
     "HandoverError",
     "DecisionDenied",
     "DecisionExpired",
@@ -36,4 +50,4 @@ __all__ = [
     "require_approval",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
