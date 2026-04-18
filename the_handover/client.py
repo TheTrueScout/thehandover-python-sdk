@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
 import httpx
 
+from . import dev as _dev
 from .exceptions import (
     DecisionDenied,
     DecisionExpired,
@@ -86,26 +90,43 @@ class HandoverClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: Optional[str] = None,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 30.0,
         policy: Optional[ApprovalPolicy] = None,
     ):
-        self.api_key = api_key
+        api_key = api_key or os.environ.get("HANDOVER_API_KEY")
         self.base_url = base_url.rstrip("/")
         self.policy = policy
+        self._dev_decisions: dict[str, Decision] = {}
+
+        if not api_key:
+            if not sys.stdin.isatty():
+                raise HandoverError(
+                    "No HANDOVER_API_KEY set and no interactive terminal "
+                    "available for dev mode. Set HANDOVER_API_KEY or run from "
+                    "a terminal. Get a free key at https://thehandover.xyz/signup"
+                )
+            self.api_key = ""
+            self._dev_mode = True
+            self._http = None
+            return
+
+        self._dev_mode = False
+        self.api_key = api_key
         self._http = httpx.Client(
             base_url=self.base_url,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "the-handover-python/0.2.0",
+                "User-Agent": "the-handover-python/0.3.0",
             },
             timeout=timeout,
         )
 
     def close(self) -> None:
-        self._http.close()
+        if self._http is not None:
+            self._http.close()
 
     def __enter__(self) -> HandoverClient:
         return self
@@ -142,6 +163,17 @@ class HandoverClient:
                 flag on :meth:`get` so callers can gate execution without
                 re-reading status fields.
         """
+        if self._dev_mode:
+            return self._dev_create(
+                action=action,
+                approver=approver,
+                context=context,
+                urgency=urgency,
+                response_type=response_type,
+                context_images=context_images,
+                enforce=enforce,
+            )
+
         body: dict[str, Any] = {
             "action": action,
             "approver": approver,
@@ -201,6 +233,20 @@ class HandoverClient:
         else:
             filename, data, content_type = file
 
+        if self._dev_mode:
+            attachment = Attachment(
+                name=filename,
+                url=f"dev://local/{filename}",
+                type=content_type,
+                size=len(data),
+            )
+            decision = self._dev_decisions.get(decision_id)
+            if decision is not None:
+                existing = list(decision.attachments or [])
+                existing.append(attachment)
+                decision.attachments = existing
+            return [attachment]
+
         # Use a fresh httpx.post so the client's default JSON Content-Type
         # header doesn't clash with the multipart boundary header.
         res = httpx.post(
@@ -208,7 +254,7 @@ class HandoverClient:
             files={"file": (filename, data, content_type)},
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "User-Agent": "the-handover-python/0.2.0",
+                "User-Agent": "the-handover-python/0.3.0",
             },
             timeout=self._http.timeout,
         )
@@ -222,6 +268,9 @@ class HandoverClient:
 
     def list_attachments(self, decision_id: str) -> list[Attachment]:
         """List attachments currently on a decision."""
+        if self._dev_mode:
+            decision = self._dev_decisions.get(decision_id)
+            return list(decision.attachments or []) if decision else []
         res = self._http.get(f"/decisions/{decision_id}/attachments")
         if res.status_code >= 400:
             payload = res.json() if res.content else {}
@@ -233,6 +282,11 @@ class HandoverClient:
 
     def get(self, decision_id: str) -> Decision:
         """Get the current state of a decision."""
+        if self._dev_mode:
+            decision = self._dev_decisions.get(decision_id)
+            if decision is None:
+                raise HandoverError(f"Decision {decision_id} not found (dev mode)")
+            return decision
         res = self._http.get(f"/decisions/{decision_id}")
         if res.status_code >= 400:
             data = res.json()
@@ -251,6 +305,22 @@ class HandoverClient:
         resolved_by: Optional[str] = None,
     ) -> Decision:
         """Programmatically resolve a decision."""
+        if self._dev_mode:
+            decision = self._dev_decisions.get(decision_id)
+            if decision is None:
+                raise HandoverError(f"Decision {decision_id} not found (dev mode)")
+            status_map = {
+                "approve": DecisionStatus.APPROVED,
+                "deny": DecisionStatus.DENIED,
+                "modify": DecisionStatus.MODIFIED,
+            }
+            decision.status = status_map.get(action, DecisionStatus.MODIFIED)
+            decision.response_notes = notes
+            decision.response_data = response_data
+            decision.resolved_by = resolved_by or "dev@local"
+            decision.resolved_at = _dev.now_iso()
+            return decision
+
         body: dict[str, Any] = {"action": action}
         if notes:
             body["notes"] = notes
@@ -289,6 +359,53 @@ class HandoverClient:
             if elapsed >= max_wait:
                 raise DecisionTimeout(decision_id)
             time.sleep(min(interval, max_wait - elapsed))
+
+    # ── Dev mode helpers ─────────────────────────────────────────────
+
+    def _dev_create(
+        self,
+        action: str,
+        approver: str,
+        context: Optional[str],
+        urgency: str,
+        response_type: Optional[ResponseTypeConfig],
+        context_images: Optional[list[str]],
+        enforce: bool,
+    ) -> dict[str, Any]:
+        """Prompt the developer on stdin and store the resolved decision."""
+        status, notes, response_data, execute_at = _dev.prompt_decision(
+            action=action,
+            approver=approver,
+            urgency=urgency,
+            context=context,
+            response_type=response_type,
+        )
+        now = _dev.now_iso()
+        decision_id = f"dev_{uuid.uuid4().hex[:12]}"
+        decision = Decision(
+            id=decision_id,
+            status=DecisionStatus(status),
+            action=action,
+            context=context,
+            urgency=urgency,
+            response_notes=notes,
+            response_data=response_data,
+            resolved_at=now,
+            resolved_by="dev@local",
+            created_at=now,
+            execute_at=execute_at,
+            context_images=context_images,
+            enforce=enforce,
+            action_permitted=(status in ("approved", "modified", "scheduled"))
+            if enforce
+            else None,
+        )
+        self._dev_decisions[decision_id] = decision
+        return {
+            "id": decision_id,
+            "status": status,
+            "auto_resolved": True,
+        }
 
     # ── High-level enforcement ───────────────────────────────────────
 
