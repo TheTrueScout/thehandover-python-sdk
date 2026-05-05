@@ -134,7 +134,7 @@ class HandoverClient:
                 raise HandoverError(
                     "No HANDOVER_API_KEY set and no interactive terminal "
                     "available for dev mode. Set HANDOVER_API_KEY or pass "
-                    "dev_mode=True. Get a free key at https://thehandover.xyz/signup"
+                    "dev_mode=True. Get a free key at https://thehandover.xyz/dashboard"
                 )
             self.api_key = ""
             self._dev_mode = True
