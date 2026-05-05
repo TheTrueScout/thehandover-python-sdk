@@ -94,18 +94,47 @@ class HandoverClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 30.0,
         policy: Optional[ApprovalPolicy] = None,
+        dev_mode: Optional[bool] = None,
     ):
+        """Initialise the client.
+
+        Args:
+            dev_mode: When ``True`` every decision auto-approves locally with
+                no network call and no prompt — perfect for CI, unit tests, and
+                local agent runs. When ``False`` (default behaviour with a real
+                key) the client always hits the API. When ``None`` (the
+                default), the SDK auto-detects: if no API key and stdin is a
+                TTY it falls back to the interactive ``dev`` prompt.
+        """
         api_key = api_key or os.environ.get("HANDOVER_API_KEY")
         self.base_url = base_url.rstrip("/")
         self.policy = policy
         self._dev_decisions: dict[str, Decision] = {}
+        # Explicit dev_mode=True auto-approves without prompting; combined
+        # with no api key it also avoids the "missing key" error so tests work
+        # in non-interactive environments (CI, Docker).
+        self._dev_auto_approve = dev_mode is True
+
+        if dev_mode is True:
+            # Force dev mode regardless of whether a key is set — useful in
+            # CI where HANDOVER_API_KEY may be present but you don't want to
+            # actually hit the network.
+            self.api_key = api_key or ""
+            self._dev_mode = True
+            self._http = None
+            return
 
         if not api_key:
+            if dev_mode is False:
+                raise HandoverError(
+                    "No HANDOVER_API_KEY set and dev_mode=False. Set "
+                    "HANDOVER_API_KEY or pass dev_mode=True to test locally."
+                )
             if not sys.stdin.isatty():
                 raise HandoverError(
                     "No HANDOVER_API_KEY set and no interactive terminal "
-                    "available for dev mode. Set HANDOVER_API_KEY or run from "
-                    "a terminal. Get a free key at https://thehandover.xyz/signup"
+                    "available for dev mode. Set HANDOVER_API_KEY or pass "
+                    "dev_mode=True. Get a free key at https://thehandover.xyz/signup"
                 )
             self.api_key = ""
             self._dev_mode = True
@@ -119,7 +148,7 @@ class HandoverClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "the-handover-python/0.3.0",
+                "User-Agent": "the-handover-python/0.4.0",
             },
             timeout=timeout,
         )
@@ -150,11 +179,12 @@ class HandoverClient:
         response_type: Optional[ResponseTypeConfig] = None,
         context_images: Optional[list[str]] = None,
         enforce: bool = False,
-    ) -> dict[str, Any]:
+    ) -> Decision:
         """Create a decision request (non-blocking).
 
-        Returns the raw API response with ``id``, ``status``, ``expires_at``.
-        For most use cases, prefer :meth:`approve` which blocks until resolved.
+        Returns a :class:`Decision` with at minimum ``id``, ``status``,
+        ``expires_at``, and the request fields populated. For most use cases,
+        prefer :meth:`approve` which blocks until the approver responds.
 
         Args:
             context_images: Up to 5 HTTP(S) URLs of images the approver should
@@ -162,6 +192,10 @@ class HandoverClient:
             enforce: When ``True`` the server returns an ``action_permitted``
                 flag on :meth:`get` so callers can gate execution without
                 re-reading status fields.
+
+        .. note::
+            **Breaking change in 0.4.0** — previously this returned a raw
+            ``dict``. If you were doing ``d['id']``, switch to ``d.id``.
         """
         if self._dev_mode:
             return self._dev_create(
@@ -200,7 +234,11 @@ class HandoverClient:
             raise HandoverError(
                 f"API error {res.status_code}: {data.get('error', res.text)}"
             )
-        return res.json()
+        # The create endpoint returns a minimal payload; merge with the request
+        # body so the returned Decision is immediately useful (action, urgency,
+        # etc. visible without an extra .get() round-trip).
+        payload = {**body, **res.json()}
+        return Decision.from_dict(payload)
 
     # ── Attachments ──────────────────────────────────────────────────
 
@@ -371,15 +409,25 @@ class HandoverClient:
         response_type: Optional[ResponseTypeConfig],
         context_images: Optional[list[str]],
         enforce: bool,
-    ) -> dict[str, Any]:
-        """Prompt the developer on stdin and store the resolved decision."""
-        status, notes, response_data, execute_at = _dev.prompt_decision(
-            action=action,
-            approver=approver,
-            urgency=urgency,
-            context=context,
-            response_type=response_type,
-        )
+    ) -> Decision:
+        """Resolve a decision locally — either by auto-approving (when the
+        client was created with ``dev_mode=True``) or by prompting the
+        developer on stdin (legacy behaviour).
+        """
+        if self._dev_auto_approve:
+            # Silent auto-approve; no prompt, no network call. For CI/tests.
+            status: str = "approved"
+            notes: Optional[str] = "auto-approved (dev_mode=True)"
+            response_data: Optional[dict[str, Any]] = None
+            execute_at: Optional[str] = None
+        else:
+            status, notes, response_data, execute_at = _dev.prompt_decision(
+                action=action,
+                approver=approver,
+                urgency=urgency,
+                context=context,
+                response_type=response_type,
+            )
         now = _dev.now_iso()
         decision_id = f"dev_{uuid.uuid4().hex[:12]}"
         decision = Decision(
@@ -401,11 +449,7 @@ class HandoverClient:
             else None,
         )
         self._dev_decisions[decision_id] = decision
-        return {
-            "id": decision_id,
-            "status": status,
-            "auto_resolved": True,
-        }
+        return decision
 
     # ── High-level enforcement ───────────────────────────────────────
 
